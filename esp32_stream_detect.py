@@ -82,6 +82,24 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Folder to save frames with detected drones (annotated with boxes). Disabled if not set.",
     )
+    parser.add_argument(
+        "--serial-port",
+        type=str,
+        default=None,
+        help="If set, send detection status over this serial port to an ESP32 display (e.g. /dev/ttyUSB0).",
+    )
+    parser.add_argument(
+        "--baud",
+        type=int,
+        default=115200,
+        help="Baudrate for serial telemetry to ESP32 (when --serial-port is set).",
+    )
+    parser.add_argument(
+        "--serial-interval",
+        type=float,
+        default=1.0,
+        help="Minimum seconds between serial messages to ESP32.",
+    )
     return parser.parse_args()
 
 
@@ -130,11 +148,24 @@ def main() -> None:
     if save_dir:
         save_dir.mkdir(parents=True, exist_ok=True)
 
+    ser = None
+    if args.serial_port:
+        try:
+            import serial  # type: ignore
+        except ImportError:
+            sys.exit("pyserial is required for --serial-port. Install with: pip install pyserial")
+        try:
+            ser = serial.Serial(args.serial_port, args.baud, timeout=0)
+            print(f"Serial telemetry enabled on {args.serial_port} @ {args.baud}")
+        except Exception as exc:  # pragma: no cover - depends on hardware
+            sys.exit(f"Failed to open serial port {args.serial_port}: {exc}")
+
     model = load_model(weights_path, args.device)
     cap = connect_stream(args.stream_url)
 
     last_print = 0.0
     last_state: Optional[bool] = None
+    last_serial = 0.0
     print("Connected to stream. Press Ctrl+C or close the window to stop.")
 
     try:
@@ -180,6 +211,17 @@ def main() -> None:
                     )
                 last_print = now
                 last_state = state
+
+            if ser and now - last_serial >= args.serial_interval:
+                if drone_conf is None:
+                    msg = "NONE\n"
+                else:
+                    msg = f"DRONE {drone_conf:.3f}\n"
+                try:
+                    ser.write(msg.encode("utf-8"))
+                except Exception:
+                    pass  # best-effort telemetry
+                last_serial = now
 
             if args.show:
                 frame_to_show = results[0].plot() if results else frame
