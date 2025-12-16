@@ -9,9 +9,6 @@
 #include "esp_timer.h"
 #include "img_converters.h"
 #include "esp_http_server.h"
-#include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 
 #if CONFIG_IDF_TARGET_ESP32
 #include "soc/soc.h"
@@ -21,25 +18,6 @@
 // #define CAMERA_MODEL_AI_THINKER
 // Uncomment if you use ESP32-S3-EYE / ESP32-S3 CAM board with OV2640:
 #define CAMERA_MODEL_ESP32S3_EYE
-
-// Optional buzzer/LED pin to signal detection received from PC.
-// Choose a free GPIO not used by camera; adjust to your board.
-#ifndef BEEPER_PIN
-#define BEEPER_PIN 33
-#endif
-
-// I2C pins for SSD1306 OLED (change to match your wiring).
-#ifndef OLED_SDA
-#define OLED_SDA 21  // SDA wire
-#endif
-#ifndef OLED_SCL
-#define OLED_SCL 19  // SCL wire
-#endif
-
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_RESET -1
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 #if defined(CAMERA_MODEL_AI_THINKER)
 #define PWDN_GPIO_NUM 32
@@ -83,36 +61,6 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 const char *ssid = "BurningCocks";
 const char *password = "karmanen";
-
-// State received from host PC (updated via Serial).
-volatile bool droneDetected = false;
-volatile float droneProb = 0.0f;
-unsigned long lastSignalMs = 0;
-const unsigned long signalHoldMs = 800;  // keep beeper active shortly after last detection
-unsigned long lastDisplayMs = 0;
-const unsigned long displayIntervalMs = 1000;  // update screen at most once per second
-int consecutiveDetections = 0;
-const int requiredDetections = 3;  // number of consecutive DRONE messages required to confirm detection
-
-void showStatus() {
-  display.clearDisplay();
-  display.setTextSize(2);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println("Drone:");
-  display.setCursor(0, 24);
-  if (droneDetected) {
-    display.println("YES");
-    display.setTextSize(1);
-    display.setCursor(0, 48);
-    display.print("Prob: ");
-    display.print(droneProb * 100.0f, 1);
-    display.println("%");
-  } else {
-    display.println("NO");
-  }
-  display.display();
-}
 
 // Streaming server definitions (borrowed from the official CameraWebServer example).
 #define PART_BOUNDARY "123456789000000000000987654321"
@@ -179,21 +127,6 @@ void setup() {
   Serial.println();
   Serial.println("Booting ESP32-CAM");
 
-  Wire.begin(OLED_SDA, OLED_SCL);
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("SSD1306 allocation failed");
-  } else {
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
-    display.println("Waiting for data...");
-    display.display();
-  }
-
-  pinMode(BEEPER_PIN, OUTPUT);
-  digitalWrite(BEEPER_PIN, LOW);
-
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -251,48 +184,6 @@ void setup() {
 }
 
 void loop() {
-  // Non-blocking read of serial telemetry from PC (esp32_stream_detect.py).
-  while (Serial.available()) {
-    static String line;
-    char c = Serial.read();
-    if (c == '\n' || c == '\r') {
-      if (line.length()) {
-        line.trim();
-        if (line.startsWith("DRONE")) {
-          int idx = line.indexOf(' ');
-          if (idx > 0) {
-            droneProb = line.substring(idx + 1).toFloat();
-          }
-          // Require consecutive DRONE messages before confirming detection.
-          consecutiveDetections = min(consecutiveDetections + 1, requiredDetections);
-          if (consecutiveDetections >= requiredDetections) {
-            droneDetected = true;
-            lastSignalMs = millis();
-          }
-        } else if (line.startsWith("NONE")) {
-          droneDetected = false;
-          droneProb = 0.0f;
-          consecutiveDetections = 0;
-          lastSignalMs = millis();
-        }
-        line = "";
-      }
-    } else {
-      line += c;
-    }
-  }
-
-  // Drive buzzer/LED based on last detection.
-  unsigned long now = millis();
-  bool active = droneDetected && (now - lastSignalMs < signalHoldMs);
-  digitalWrite(BEEPER_PIN, active ? HIGH : LOW);
-
-  // Update OLED at most once per second.
-  if (now - lastDisplayMs >= displayIntervalMs) {
-    showStatus();
-    lastDisplayMs = now;
-  }
-
-  // Small sleep to avoid busy loop; streaming handled by HTTP server task.
-  delay(10);
+  // Nothing to do here; the HTTP server handles streaming.
+  delay(10000);
 }

@@ -1,13 +1,21 @@
 """
 Streaming drone detector for ESP32-CAM feeds using YOLOv8.
 
-Usage:
-  python esp32_stream_detect.py --stream-url http://<esp32-ip>:81/stream --weights best.pt --show
+Usage (пример):
+  python esp32_stream_detect.py \
+      --stream-url http://<cam-ip>:81/stream \
+      --weights best.pt \
+      --udp-host 192.168.0.50 \
+      --udp-port 9000 \
+      --show
 
-The script connects to the MJPEG stream served by the ESP32-CAM, runs
-YOLOv8 inference frame-by-frame, and prints a textual verdict with the
-current drone probability to the console. Optionally, it can also render
-an OpenCV window with the detections overlaid.
+Скрипт:
+  - читает MJPEG-стрим с ESP32-CAM,
+  - гоняет YOLOv8 по кадрам,
+  - выводит вероятность "drone",
+  - при наличии --udp-host шлёт строки
+        "DRONE <prob>" или "NONE"
+    по UDP на ESP32-индикатор.
 """
 
 from __future__ import annotations
@@ -82,6 +90,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Folder to save frames with detected drones (annotated with boxes). Disabled if not set.",
     )
+
+    # --- старый вариант: Serial-телеметрия (можно использовать или игнорировать) ---
     parser.add_argument(
         "--serial-port",
         type=str,
@@ -100,6 +110,27 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help="Minimum seconds between serial messages to ESP32.",
     )
+
+    # --- новый вариант: UDP на ESP32 DevKitC ---
+    parser.add_argument(
+        "--udp-host",
+        type=str,
+        default=None,
+        help="If set, send detection status via UDP to this host (IP of ESP32 DevKitC).",
+    )
+    parser.add_argument(
+        "--udp-port",
+        type=int,
+        default=9000,
+        help="UDP port on ESP32 DevKitC (default 9000).",
+    )
+    parser.add_argument(
+        "--udp-interval",
+        type=float,
+        default=0.5,
+        help="Minimum seconds between UDP messages to ESP32.",
+    )
+
     return parser.parse_args()
 
 
@@ -148,6 +179,7 @@ def main() -> None:
     if save_dir:
         save_dir.mkdir(parents=True, exist_ok=True)
 
+    # --- Serial (опционально) ---
     ser = None
     if args.serial_port:
         try:
@@ -160,12 +192,22 @@ def main() -> None:
         except Exception as exc:  # pragma: no cover - depends on hardware
             sys.exit(f"Failed to open serial port {args.serial_port}: {exc}")
 
+    # --- UDP (ESP32 DevKitC) ---
+    udp_sock = None
+    udp_target = None
+    if args.udp_host:
+        import socket
+        udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp_target = (args.udp_host, args.udp_port)
+        print(f"UDP telemetry enabled to {udp_target[0]}:{udp_target[1]}")
+
     model = load_model(weights_path, args.device)
     cap = connect_stream(args.stream_url)
 
     last_print = 0.0
     last_state: Optional[bool] = None
     last_serial = 0.0
+    last_udp = 0.0
     print("Connected to stream. Press Ctrl+C or close the window to stop.")
 
     try:
@@ -212,16 +254,27 @@ def main() -> None:
                 last_print = now
                 last_state = state
 
+            # --- Формируем строку статуса, которую можно слать и по Serial, и по UDP ---
+            if drone_conf is None:
+                msg = "NONE\n"
+            else:
+                msg = f"DRONE {drone_conf:.3f}\n"
+
+            # --- Serial-телеметрия ---
             if ser and now - last_serial >= args.serial_interval:
-                if drone_conf is None:
-                    msg = "NONE\n"
-                else:
-                    msg = f"DRONE {drone_conf:.3f}\n"
                 try:
                     ser.write(msg.encode("utf-8"))
                 except Exception:
                     pass  # best-effort telemetry
                 last_serial = now
+
+            # --- UDP-телеметрия на ESP32 DevKitC ---
+            if udp_sock and udp_target and now - last_udp >= args.udp_interval:
+                try:
+                    udp_sock.sendto(msg.encode("utf-8"), udp_target)
+                except Exception:
+                    pass  # best-effort telemetry
+                last_udp = now
 
             if args.show:
                 frame_to_show = results[0].plot() if results else frame
@@ -242,6 +295,10 @@ def main() -> None:
         cap.release()
         if args.show:
             cv2.destroyAllWindows()
+        if udp_sock:
+            udp_sock.close()
+        if ser:
+            ser.close()
 
 
 if __name__ == "__main__":
